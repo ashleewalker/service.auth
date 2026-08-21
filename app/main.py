@@ -17,7 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     app_name: str = "service.auth"
-    jwt_secret: str = "change-me-in-production"
+    jwt_secret: str = "dev-only-change-this-secret"
     access_token_minutes: int = 15
     refresh_token_days: int = 30
     issuer: str = "service.auth"
@@ -31,6 +31,10 @@ bearer = HTTPBearer(auto_error=False)
 users: dict[str, dict] = {}
 refresh_tokens: dict[str, dict] = {}
 audit_events: list[dict] = []
+
+# Privileged scopes are never self-assigned during public registration.
+PUBLIC_SCOPES = {"profile:read", "profile:write"}
+PRIVILEGED_SCOPES = {"audit:read", "admin"}
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
@@ -163,6 +167,10 @@ def healthz():
 @app.post("/v1/auth/register", response_model=TokenOut, status_code=201)
 def register(body: RegisterIn, request: Request):
     email = body.email.strip().lower()
+    requested = set(body.scopes)
+    if requested - PUBLIC_SCOPES:
+        audit("register", None, request, "forbidden_scope")
+        raise HTTPException(status_code=403, detail="Privileged scopes require an administrator")
     if email in users:
         audit("register", None, request, "duplicate")
         raise HTTPException(status_code=409, detail="Account already exists")
@@ -170,7 +178,7 @@ def register(body: RegisterIn, request: Request):
         "id": secrets.token_urlsafe(16),
         "email": email,
         "password_hash": password_hash.hash(body.password),
-        "scopes": sorted(set(body.scopes)),
+        "scopes": sorted(requested),
     }
     users[email] = user
     audit("register", user["id"], request)
