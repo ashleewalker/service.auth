@@ -47,3 +47,15 @@ def test_scope_protects_audit_endpoint():
     token = registered.json()["access_token"]
     response = client.get("/v1/audit", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
+
+
+def test_privileged_scope_cannot_be_self_assigned():
+    response = client.post(
+        "/v1/auth/register",
+        json={
+            "email": "admin@example.com",
+            "password": "correct horse battery staple",
+            "scopes": ["audit:read"],
+        },
+    )
+    assert response.status_code == 403
