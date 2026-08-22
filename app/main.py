@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-only-change-this-secret"
     access_token_minutes: int = 15
     refresh_token_days: int = 30
+    skill_token_minutes: int = 5
     issuer: str = "service.auth"
 
 
@@ -36,7 +37,27 @@ audit_events: list[dict] = []
 PUBLIC_SCOPES = {"profile:read", "profile:write"}
 PRIVILEGED_SCOPES = {"audit:read", "admin"}
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
+# Skill manifests define the minimum capability set a skill needs. A caller can only
+# receive a skill token when every required scope is already present on its identity.
+SKILLS: dict[str, dict] = {
+    "profile-reader": {
+        "version": "1.0.0",
+        "description": "Read the authenticated user's profile.",
+        "scopes": ["profile:read"],
+    },
+    "profile-writer": {
+        "version": "1.0.0",
+        "description": "Update the authenticated user's profile.",
+        "scopes": ["profile:write"],
+    },
+    "audit-reader": {
+        "version": "1.0.0",
+        "description": "Read recent authentication audit events.",
+        "scopes": ["audit:read"],
+    },
+}
+
+app = FastAPI(title=settings.app_name, version="0.2.0")
 
 
 class RegisterIn(BaseModel):
@@ -54,6 +75,10 @@ class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=32)
 
 
+class SkillGrantIn(BaseModel):
+    skill: str = Field(min_length=1, max_length=100)
+
+
 class TokenOut(BaseModel):
     access_token: str
     refresh_token: str
@@ -62,9 +87,25 @@ class TokenOut(BaseModel):
     scopes: list[str]
 
 
+class SkillTokenOut(BaseModel):
+    capability_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    skill: str
+    version: str
+    scopes: list[str]
+
+
 class MeOut(BaseModel):
     sub: str
     email: str
+    scopes: list[str]
+
+
+class SkillOut(BaseModel):
+    name: str
+    version: str
+    description: str
     scopes: list[str]
 
 
@@ -120,6 +161,30 @@ def tokens_for(user: dict) -> TokenOut:
     )
 
 
+def issue_skill_token(user: dict, skill_name: str) -> SkillTokenOut:
+    skill = SKILLS[skill_name]
+    ttl = settings.skill_token_minutes * 60
+    now_epoch = int(time.time())
+    payload = {
+        "sub": user["id"],
+        "aud": skill_name,
+        "skill": skill_name,
+        "skill_version": skill["version"],
+        "scope": " ".join(skill["scopes"]),
+        "iss": settings.issuer,
+        "iat": now_epoch,
+        "exp": now_epoch + ttl,
+    }
+    token = jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+    return SkillTokenOut(
+        capability_token=token,
+        expires_in=ttl,
+        skill=skill_name,
+        version=skill["version"],
+        scopes=skill["scopes"],
+    )
+
+
 async def current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> dict:
@@ -162,6 +227,30 @@ async def security_headers(request: Request, call_next):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/v1/skills", response_model=list[SkillOut])
+def list_skills():
+    return [SkillOut(name=name, **manifest) for name, manifest in sorted(SKILLS.items())]
+
+
+@app.post("/v1/skills/token", response_model=SkillTokenOut)
+def skill_token(
+    body: SkillGrantIn,
+    request: Request,
+    user: Annotated[dict, Depends(current_user)],
+):
+    skill = SKILLS.get(body.skill)
+    if not skill:
+        audit("skill_token", user["id"], request, "unknown_skill")
+        raise HTTPException(status_code=404, detail="Unknown skill")
+    required = set(skill["scopes"])
+    granted = set(user["scopes"])
+    if not required.issubset(granted):
+        audit("skill_token", user["id"], request, "insufficient_scope")
+        raise HTTPException(status_code=403, detail="Identity lacks required skill scopes")
+    audit("skill_token", user["id"], request)
+    return issue_skill_token(user, body.skill)
 
 
 @app.post("/v1/auth/register", response_model=TokenOut, status_code=201)

@@ -15,11 +15,44 @@ Today’s agentic systems are moving from simple API calls to long-running, tool
 - One-time rotating refresh tokens
 - Scope-based authorization
 - Privileged-scope escalation protection at registration
-- Structured audit events for authentication activity
+- **Skill manifests with least-privilege capability tokens**
+- Five-minute skill credentials bound to a specific skill and version
+- Structured audit events for authentication and skill activity
 - Security response headers
 - FastAPI-generated OpenAPI docs
 - Docker runtime
 - Automated pytest CI
+
+## Why skill-level authorization matters
+
+AI coding agents and tool-using agents increasingly load reusable skills. A skill should not automatically inherit every permission held by the parent identity.
+
+`service.auth` adds a narrow capability-token boundary:
+
+1. A skill declares the minimum scopes it needs.
+2. The caller authenticates with its normal access token.
+3. `service.auth` checks that the caller already has **every** required scope.
+4. The service issues a short-lived capability token with an `aud` claim bound to that skill and a version identifier.
+5. The skill receives only the permissions declared by its manifest, never additional privileges.
+
+This makes skills portable without making them all-powerful.
+
+### List available skills
+
+```bash
+curl http://localhost:8000/v1/skills
+```
+
+### Mint a skill capability token
+
+```bash
+curl -X POST http://localhost:8000/v1/skills/token \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"skill":"profile-reader"}'
+```
+
+Capability tokens expire after five minutes by default and are cryptographically scoped to the requested skill.
 
 ## Quick start
 
@@ -51,6 +84,8 @@ curl http://localhost:8000/v1/me \
 
 Public registration can only request non-privileged scopes. Administrative scopes such as `audit:read` must be provisioned by a trusted control plane rather than by an end user.
 
+Skill tokens are **not** an escalation mechanism: a caller can only mint a token when its identity already contains every scope declared by the skill manifest. Skill credentials are short-lived and audience-bound.
+
 Refresh tokens are stored only as SHA-256 digests and are invalidated when exchanged, reducing the impact of token theft and replay.
 
 For production, set a high-entropy `JWT_SECRET`, replace the in-memory stores with Postgres/Redis, add distributed rate limiting, configure TLS at the edge, and move privileged provisioning behind an administrator or workload identity flow.
@@ -63,9 +98,10 @@ The current repository is intentionally small so it can be deployed as a sidecar
 2. Redis-backed refresh-token revocation and distributed rate limits.
 3. OIDC/JWKS federation for external identity providers.
 4. Workload identity for agent-to-agent calls.
-5. Tamper-evident audit export to an observability/SIEM pipeline.
-6. Policy evaluation for resource-level authorization.
+5. Signed, externally managed skill manifests.
+6. Tamper-evident audit export to an observability/SIEM pipeline.
+7. Policy evaluation for resource-level authorization.
 
 ## Inspiration
 
-The project is a focused substitute in the same broader problem space as today’s fast-growing agent/accountability infrastructure: instead of building a general AI context graph, it makes the **identity, permission, credential lifecycle, and audit boundary** explicit and reusable.
+Today’s GitHub trend is heavily focused on reusable AI-agent skills and making agent workflows more systematic. `service.auth` takes a complementary security-first approach: instead of only defining what a skill can do, it makes **identity, least privilege, credential lifecycle, and accountability** enforceable at runtime.
