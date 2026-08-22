@@ -59,3 +59,43 @@ def test_privileged_scope_cannot_be_self_assigned():
         },
     )
     assert response.status_code == 403
+
+
+def test_skill_token_requires_identity_scope():
+    registered = client.post(
+        "/v1/auth/register",
+        json={"email": "skill@example.com", "password": "correct horse battery staple"},
+    )
+    token = registered.json()["access_token"]
+
+    granted = client.post(
+        "/v1/skills/token",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"skill": "profile-reader"},
+    )
+    assert granted.status_code == 200
+    body = granted.json()
+    assert body["skill"] == "profile-reader"
+    assert body["scopes"] == ["profile:read"]
+    assert body["expires_in"] == 300
+
+    denied = client.post(
+        "/v1/skills/token",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"skill": "audit-reader"},
+    )
+    assert denied.status_code == 403
+
+
+def test_unknown_skill_is_rejected():
+    registered = client.post(
+        "/v1/auth/register",
+        json={"email": "unknown@example.com", "password": "correct horse battery staple"},
+    )
+    token = registered.json()["access_token"]
+    response = client.post(
+        "/v1/skills/token",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"skill": "does-not-exist"},
+    )
+    assert response.status_code == 404
