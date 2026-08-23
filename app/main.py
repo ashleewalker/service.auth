@@ -13,6 +13,8 @@ from pwdlib import PasswordHash
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.skill_guard import scan_skill
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -57,7 +59,7 @@ SKILLS: dict[str, dict] = {
     },
 }
 
-app = FastAPI(title=settings.app_name, version="0.2.0")
+app = FastAPI(title=settings.app_name, version="0.3.0")
 
 
 class RegisterIn(BaseModel):
@@ -77,6 +79,10 @@ class RefreshIn(BaseModel):
 
 class SkillGrantIn(BaseModel):
     skill: str = Field(min_length=1, max_length=100)
+
+
+class SkillScanIn(BaseModel):
+    instructions: str = Field(min_length=1, max_length=50_000)
 
 
 class TokenOut(BaseModel):
@@ -107,6 +113,18 @@ class SkillOut(BaseModel):
     version: str
     description: str
     scopes: list[str]
+
+
+class SkillFindingOut(BaseModel):
+    rule_id: str
+    severity: str
+    message: str
+    evidence: str
+
+
+class SkillScanOut(BaseModel):
+    decision: str
+    findings: list[SkillFindingOut]
 
 
 def now() -> datetime:
@@ -232,6 +250,17 @@ def healthz():
 @app.get("/v1/skills", response_model=list[SkillOut])
 def list_skills():
     return [SkillOut(name=name, **manifest) for name, manifest in sorted(SKILLS.items())]
+
+
+@app.post("/v1/skills/scan", response_model=SkillScanOut)
+def scan_skill_instructions(body: SkillScanIn, request: Request):
+    findings = scan_skill(body.instructions)
+    decision = "block" if any(f.severity == "critical" for f in findings) else "review" if findings else "allow"
+    audit("skill_scan", None, request, decision)
+    return SkillScanOut(
+        decision=decision,
+        findings=[SkillFindingOut(**finding.__dict__) for finding in findings],
+    )
 
 
 @app.post("/v1/skills/token", response_model=SkillTokenOut)
